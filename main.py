@@ -87,10 +87,18 @@ def train(args):
                                     transforms.ToTensor(),
                                     transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))]) 
     trainset = ImageTextDataset(X, y, transform)
-    trainloader = torch.utils.data.DataLoader(trainset, shuffle = True, batch_size = args.batch_size)
+    trainloader = torch.utils.data.DataLoader(trainset, shuffle = True, batch_size = args.batch_size, drop_last= True)
 
-    resnet50 = models.resnet50(pretrained = True).to(device).eval()
-    bert = BertModel.from_pretrained('bert-base-uncased').to(device).eval()
+    resnet50 = models.resnet50(pretrained = True).to(device)
+    resnet50 = torch.nn.Sequential(*(list(resnet50.children())[:-1])).to(device)
+    bert = BertModel.from_pretrained('bert-base-uncased').to(device)
+
+    for param in resnet50.parameters():
+        param.requires_grad = False
+
+    for param in bert.parameters():
+        param.requires_grad = False
+
     model = Towers(len(np.unique(y))).to(device)
     opt = RMSprop(model.parameters(), lr = args.lr, momentum = 0.9)
 
@@ -106,7 +114,7 @@ def train(args):
             imgs = imgs.to(device)
             labels = labels.to(device)
 
-            img_embeddings = resnet50(imgs).topk(64)[0]
+            img_embeddings = resnet50(imgs).to(device).squeeze(2).squeeze(2)
             text_embeddings = torch.stack([get_encoding(text, bert, device) for text in texts]).to(device)
             
             opt.zero_grad()
@@ -160,7 +168,8 @@ def evaluate(args):
   valset = ImageTextDataset(X, y, transform)
   valloader = torch.utils.data.DataLoader(valset, shuffle = False, batch_size = 1)
 
-  resnet50 = models.resnet50(pretrained = True).to(device).eval()
+  resnet50 = models.resnet50(pretrained = True).to(device)
+  resnet50 = torch.nn.Sequential(*(list(resnet50.children())[:-1])).to(device).eval()
   bert = BertModel.from_pretrained('bert-base-uncased').to(device).eval()
   
   model = Towers().to(device).eval()
@@ -173,24 +182,25 @@ def evaluate(args):
   with torch.no_grad():
     for data in valloader:
       
-      img, text, label = data
-      img = img.to(device)
-      label = label.to(device)
-      img_embedding = resnet50(img).topk(64)[0]
-      text_embedding = torch.stack([get_encoding(t, bert, device) for t in text]).to(device)
+        img, text, label = data
+        img = img.to(device)
+        label = label.to(device)
 
-      pred, img_f, text_f = model(img_embedding, text_embedding)
+        img_embeddings = resnet50(img).to(device).squeeze(2).squeeze(2)
+        text_embeddings = torch.stack([get_encoding(text, bert, device) for text in text]).to(device)
+
+        pred, img_f, text_f = model(img_embeddings, text_embeddings)
       
-      classification_loss = classification_loss_fn(pred, label) 
-      gap_loss = gap_loss_fn(img_f, text_f)
+        classification_loss = classification_loss_fn(pred, label) 
+        gap_loss = gap_loss_fn(img_f, text_f)
 
-      loss = classification_loss + gap_loss
-      val_loss += loss.item()
+        loss = classification_loss + gap_loss
+        val_loss += loss.item()
 
-      pred = pred.data.max(1)[1]
-      correct += pred.eq(label.data).sum().item()
+        pred = pred.data.max(1)[1]
+        correct += pred.eq(label.data).sum().item()
 
-      pred_label_pairs.append((label.item(), pred.item()))
+        pred_label_pairs.append((label.item(), pred.item()))
 
     val_loss /= len(valloader.dataset)
     val_accuracy = 100.0 * correct / len(valloader.dataset)
